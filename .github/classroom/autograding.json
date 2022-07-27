@@ -9,6 +9,16 @@
       "comparison": "included",
       "timeout": 10,
       "points": 5
+    },
+    {
+      "name": "Test 2",
+      "setup": "",
+      "run": "echo 'fail' && exit 1",
+      "input": "",
+      "output": "",
+      "comparison": "included",
+      "timeout": 10,
+      "points": 5
     }
   ]
 }
