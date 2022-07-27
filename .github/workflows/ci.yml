@@ -34,3 +34,5 @@ jobs:
       - run: npm run build
 
       - uses: ./
+        with:
+          step-summary: true
