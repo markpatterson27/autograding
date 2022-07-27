@@ -202,9 +202,9 @@ export const runAll = async (tests: Array<Test>, cwd: string): Promise<void> => 
   let hasPoints = false
 
   const stepSummary = core.getInput('step-summary').toLowerCase() === 'true' ? true : false
-  let summary = core.summary
-  let summaryTableRows = []
-  // if (stepSummary) 
+  const summary = core.summary
+  const summaryTableRows = []
+  // if (stepSummary)
 
   // https://help.github.com/en/actions/reference/development-tools-for-github-actions#stop-and-start-log-commands-stop-commands
   const token = uuidv4()
@@ -215,7 +215,7 @@ export const runAll = async (tests: Array<Test>, cwd: string): Promise<void> => 
   let failed = false
 
   for (const test of tests) {
-    let summaryTableRow = [] // [test name, result, points, message]
+    const summaryTableRow = [] // [test name, result, points, message]
 
     try {
       if (test.points) {
@@ -254,7 +254,7 @@ export const runAll = async (tests: Array<Test>, cwd: string): Promise<void> => 
         if (stepSummary) summaryTableRow.push(`Failed to run test '${test.name}'`)
       }
     }
-    summaryTableRows.push(summaryTableRow)
+    if (stepSummary) summaryTableRows.push(summaryTableRow)
   }
 
   // Restart command processing
