@@ -71,7 +71,7 @@ const waitForExit = async (child: ChildProcess, timeout: number): Promise<void> 
     const exitTimeout = setTimeout(() => {
       timedOut = true
       reject(new TestTimeoutError(`Setup timed out in ${timeout} milliseconds`))
-      kill(child.pid)
+      if (typeof child.pid === 'number') kill(child.pid)
     }, timeout)
 
     child.once('exit', (code: number, signal: string) => {
@@ -105,6 +105,9 @@ const runSetup = async (test: Test, cwd: string, timeout: number): Promise<void>
     env: {
       PATH: process.env['PATH'],
       FORCE_COLOR: 'true',
+      DOTNET_CLI_HOME: '/tmp',
+      DOTNET_NOLOGO: 'true',
+      HOME: process.env['HOME'],
     },
   })
 
@@ -112,12 +115,12 @@ const runSetup = async (test: Test, cwd: string, timeout: number): Promise<void>
   process.stdout.write(indent('\n'))
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  setup.stdout.on('data', chunk => {
+  setup.stdout.on('data', (chunk) => {
     process.stdout.write(indent(chunk))
   })
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  setup.stderr.on('data', chunk => {
+  setup.stderr.on('data', (chunk) => {
     process.stderr.write(indent(chunk))
   })
 
@@ -131,6 +134,9 @@ const runCommand = async (test: Test, cwd: string, timeout: number): Promise<voi
     env: {
       PATH: process.env['PATH'],
       FORCE_COLOR: 'true',
+      DOTNET_CLI_HOME: '/tmp',
+      DOTNET_NOLOGO: 'true',
+      HOME: process.env['HOME'],
     },
   })
 
@@ -139,12 +145,12 @@ const runCommand = async (test: Test, cwd: string, timeout: number): Promise<voi
   // Start with a single new line
   process.stdout.write(indent('\n'))
 
-  child.stdout.on('data', chunk => {
+  child.stdout.on('data', (chunk) => {
     process.stdout.write(indent(chunk))
     output += chunk
   })
 
-  child.stderr.on('data', chunk => {
+  child.stderr.on('data', (chunk) => {
     process.stderr.write(indent(chunk))
   })
 
@@ -201,6 +207,11 @@ export const runAll = async (tests: Array<Test>, cwd: string): Promise<void> => 
   let availablePoints = 0
   let hasPoints = false
 
+  const stepSummary = core.getInput('step-summary').toLowerCase() === 'true' ? true : false
+  const summary = core.summary
+  const summaryTableRows = []
+  // if (stepSummary)
+
   // https://help.github.com/en/actions/reference/development-tools-for-github-actions#stop-and-start-log-commands-stop-commands
   const token = uuidv4()
   log('')
@@ -210,6 +221,8 @@ export const runAll = async (tests: Array<Test>, cwd: string): Promise<void> => 
   let failed = false
 
   for (const test of tests) {
+    const summaryTableRow = [] // [test name, result, points, message]
+
     try {
       if (test.points) {
         hasPoints = true
@@ -217,19 +230,37 @@ export const runAll = async (tests: Array<Test>, cwd: string): Promise<void> => 
       }
       log(color.cyan(`📝 ${test.name}`))
       log('')
+      if (stepSummary) summaryTableRow.push(`${test.name}`)
+
       await run(test, cwd)
+
       log('')
       log(color.green(`✅ ${test.name}`))
+      if (stepSummary) summaryTableRow.push(`✅ Pass`)
+
       log(``)
       if (test.points) {
         points += test.points
+        if (stepSummary) summaryTableRow.push(`${test.points}`)
       }
+      // TODO get test output and use for feedback message
+      if (stepSummary) summaryTableRow.push(``)
     } catch (error) {
       failed = true
       log('')
       log(color.red(`❌ ${test.name}`))
-      core.setFailed(error.message)
+      if (stepSummary) summaryTableRow.push(`❌ Fail`)
+      if (hasPoints && stepSummary) summaryTableRow.push(`0`)
+
+      if (error instanceof Error) {
+        core.setFailed(error.message)
+        if (stepSummary) summaryTableRow.push(`<code>${error.message}</code>`)
+      } else {
+        core.setFailed(`Failed to run test '${test.name}'`)
+        if (stepSummary) summaryTableRow.push(`Failed to run test '${test.name}'`)
+      }
     }
+    if (stepSummary) summaryTableRows.push(summaryTableRow)
   }
 
   // Restart command processing
@@ -252,5 +283,33 @@ export const runAll = async (tests: Array<Test>, cwd: string): Promise<void> => 
     log(color.bold.bgCyan.black(text))
     core.setOutput('Points', `${points}/${availablePoints}`)
     await setCheckRunOutput(text)
+  }
+
+  // Set step summary
+  if (stepSummary) {
+    summary.addHeading(`Autograding Results`, 2)
+    summary.addTable([
+      [
+        {data: 'Test', header: true},
+        {data: 'Result', header: true},
+        ...(hasPoints ? [{data: 'Points', header: true}] : []),
+        {data: 'Message', header: true},
+      ],
+      ...summaryTableRows,
+    ])
+    summary.addBreak()
+
+    if (hasPoints) {
+      summary.addRaw(`<p>Total Points: ${points}/${availablePoints}</p>`)
+    }
+
+    if (failed) {
+      summary.addRaw(`<p>Some tests have failed. Check the action logs for more details.</p>`)
+    } else {
+      summary.addRaw(`<p>All tests passed. Well done.</p>`)
+      summary.addRaw('✨🌟💖💎🦄💎💖🌟✨🌟💖💎🦄💎💖🌟✨')
+    }
+
+    await summary.write()
   }
 }
