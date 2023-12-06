@@ -178,6 +178,7 @@ function runTest(test: Test, cwd: string, feedbackDir: string) {
     line_no: 0,
     execution_time: execution_time || 0,
     score,
+    points_available: test.points || null,
   }
 }
 
