@@ -150,10 +150,9 @@ function runTest(test: Test, cwd: string, feedbackDir: string) {
     }
 
     // read feedback file
-    feedback = fs.readFileSync(feedbackPath, 'utf8')
-
     // delete feedback file
     if (fs.existsSync(feedbackPath)) {
+      feedback = fs.readFileSync(feedbackPath, 'utf8')
       fs.unlinkSync(feedbackPath)
     }
   } catch (error) { // TODO: catch specific errors
