@@ -1,12 +1,20 @@
-import {spawn, ChildProcess} from 'child_process'
-import kill from 'tree-kill'
+import {execSync} from 'child_process'
 import {v4 as uuidv4} from 'uuid'
+import path from 'path'
+import * as fs from 'fs'
+import chalk from 'chalk'
 import * as core from '@actions/core'
 import {setCheckRunOutput} from './output'
-import * as os from 'os'
-import chalk from 'chalk'
 
 const color = new chalk.Instance({level: 1})
+
+const defaultEnv = {
+  PATH: process.env.PATH,
+  FORCE_COLOR: 'true',
+  DOTNET_CLI_HOME: '/tmp',
+  DOTNET_NOLOGO: 'true',
+  HOME: process.env.HOME,
+}
 
 export type TestComparison = 'exact' | 'included' | 'regex'
 
@@ -21,246 +29,219 @@ export interface Test {
   readonly comparison: TestComparison
 }
 
-export class TestError extends Error {
-  constructor(message: string) {
-    super(message)
-    Error.captureStackTrace(this, TestError)
-  }
+function btoa(str: string) {
+  return Buffer.from(str).toString('base64')
 }
 
-export class TestTimeoutError extends TestError {
-  constructor(message: string) {
-    super(message)
-    Error.captureStackTrace(this, TestTimeoutError)
-  }
+// create tmp dir for feedback files
+function createFeedbackDir(): string {
+  // get runner tmp dir
+  const tmpDir = process.env['RUNNER_TEMP'] || '/tmp'
+  const feedbackDir = path.join(tmpDir, '_autograding_feedback')
+  fs.mkdirSync(feedbackDir, { recursive: true })
+  return feedbackDir
 }
 
-export class TestOutputError extends TestError {
-  expected: string
-  actual: string
-
-  constructor(message: string, expected: string, actual: string) {
-    super(`${message}\nExpected:\n${expected}\nActual:\n${actual}`)
-    this.expected = expected
-    this.actual = actual
-
-    Error.captureStackTrace(this, TestOutputError)
-  }
-}
-
-const log = (text: string): void => {
-  process.stdout.write(text + os.EOL)
-}
-
-const normalizeLineEndings = (text: string): string => {
-  return text.replace(/\r\n/gi, '\n').trim()
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const indent = (text: any): string => {
-  let str = '' + new String(text)
-  str = str.replace(/\r\n/gim, '\n').replace(/\n/gim, '\n  ')
-  return str
-}
-
-const waitForExit = async (child: ChildProcess, timeout: number): Promise<void> => {
-  // eslint-disable-next-line no-undef
-  return new Promise((resolve, reject) => {
-    let timedOut = false
-
-    const exitTimeout = setTimeout(() => {
-      timedOut = true
-      reject(new TestTimeoutError(`Setup timed out in ${timeout} milliseconds`))
-      if (typeof child.pid === 'number') kill(child.pid)
-    }, timeout)
-
-    child.once('exit', (code: number, signal: string) => {
-      if (timedOut) return
-      clearTimeout(exitTimeout)
-
-      if (code === 0) {
-        resolve(undefined)
-      } else {
-        reject(new TestError(`Error: Exit with code: ${code} and signal: ${signal}`))
-      }
-    })
-
-    child.once('error', (error: Error) => {
-      if (timedOut) return
-      clearTimeout(exitTimeout)
-
-      reject(error)
-    })
-  })
-}
-
-const runSetup = async (test: Test, cwd: string, timeout: number): Promise<void> => {
-  if (!test.setup || test.setup === '') {
-    return
-  }
-
-  const setup = spawn(test.setup, {
-    cwd,
-    shell: true,
-    env: {
-      PATH: process.env['PATH'],
-      FORCE_COLOR: 'true',
-      DOTNET_CLI_HOME: '/tmp',
-      DOTNET_NOLOGO: 'true',
-      HOME: process.env['HOME'],
-    },
-  })
-
-  // Start with a single new line
-  process.stdout.write(indent('\n'))
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  setup.stdout.on('data', (chunk) => {
-    process.stdout.write(indent(chunk))
-  })
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  setup.stderr.on('data', (chunk) => {
-    process.stderr.write(indent(chunk))
-  })
-
-  await waitForExit(setup, timeout)
-}
-
-const runCommand = async (test: Test, cwd: string, timeout: number): Promise<void> => {
-  const child = spawn(test.run, {
-    cwd,
-    shell: true,
-    env: {
-      PATH: process.env['PATH'],
-      FORCE_COLOR: 'true',
-      DOTNET_CLI_HOME: '/tmp',
-      DOTNET_NOLOGO: 'true',
-      HOME: process.env['HOME'],
-    },
-  })
-
-  let output = ''
-
-  // Start with a single new line
-  process.stdout.write(indent('\n'))
-
-  child.stdout.on('data', (chunk) => {
-    process.stdout.write(indent(chunk))
-    output += chunk
-  })
-
-  child.stderr.on('data', (chunk) => {
-    process.stderr.write(indent(chunk))
-  })
-
-  // Preload the inputs
-  if (test.input && test.input !== '') {
-    child.stdin.write(test.input)
-    child.stdin.end()
-  }
-
-  await waitForExit(child, timeout)
-
-  // Eventually work off the the test type
-  if ((!test.output || test.output == '') && (!test.input || test.input == '')) {
-    return
-  }
-
-  const expected = normalizeLineEndings(test.output || '')
-  const actual = normalizeLineEndings(output)
-
-  switch (test.comparison) {
+// compare output to expected output
+function compareOutput(output: string, expected: string, method: TestComparison) {
+  switch (method) {
     case 'exact':
-      if (actual != expected) {
-        throw new TestOutputError(`The output for test ${test.name} did not match`, expected, actual)
-      }
-      break
-    case 'regex':
-      // Note: do not use expected here
-      if (!actual.match(new RegExp(test.output || ''))) {
-        throw new TestOutputError(`The output for test ${test.name} did not match`, test.output || '', actual)
-      }
-      break
+      return output === expected
+    case 'included':
+      return output.includes(expected)
+    case 'regex': {
+      const regex = new RegExp(expected)
+      return regex.test(output)
+    }
     default:
-      // The default comparison mode is 'included'
-      if (!actual.includes(expected)) {
-        throw new TestOutputError(`The output for test ${test.name} did not match`, expected, actual)
-      }
-      break
+      throw new Error(`Invalid comparison method: ${method}`)
   }
 }
 
-export const run = async (test: Test, cwd: string): Promise<void> => {
-  // Timeouts are in minutes, but need to be in ms
-  let timeout = (test.timeout || 1) * 60 * 1000 || 30000
-  const start = process.hrtime()
-  await runSetup(test, cwd, timeout)
-  const elapsed = process.hrtime(start)
-  // Subtract the elapsed seconds (0) and nanoseconds (1) to find the remaining timeout
-  timeout -= Math.floor(elapsed[0] * 1000 + elapsed[1] / 1000000)
-  await runCommand(test, cwd, timeout)
+// function getErrorMessageAndStatus(error: Error, command: string) {
+//   if (error.message.includes('ETIMEDOUT')) {
+//     return { status: 'error', errorMessage: 'Command timed out' }
+//   }
+//   if (error.message.includes('command not found')) {
+//     return { status: 'error', errorMessage: `Unable to locate executable file: ${command}` }
+//   }
+//   if (error.message.includes('Command failed')) {
+//     return { status: 'fail', errorMessage: 'failed with exit code 1' }
+//   }
+//   return  { status: 'error', errorMessage: error.message }
+// }
+
+// run test command and return output or error
+function executeTest(command: string, input: string, timeout: number, cwd: string, feedbackFile: string): {output?: string, error?: string} {
+  try {
+    // merge feedback file path into env
+    const env = {
+      ...defaultEnv,
+      AUTOGRADING_FEEDBACK: feedbackFile,
+    }
+    const output = execSync(command, {
+      cwd,
+      input,
+      timeout,
+      env
+    })
+      .toString()
+      .trim()
+    return {
+      output,
+    }
+  } catch (e) {
+    let message = ''
+    if (e instanceof Error) {
+      message = e.message.includes('ETIMEDOUT') ? 'Command was killed due to timeout' : e.message
+    } else {
+      message = `Failed to execute run test: ${test.name}: ${e}`
+    }
+    return {
+      error: message,
+    }
+  }
 }
 
-export const runAll = async (tests: Array<Test>, cwd: string): Promise<void> => {
-  let points = 0
-  let availablePoints = 0
-  let hasPoints = false
+// run specific grading tests. assume test is passed unless error or output mismatch
+function runTest(test: Test, cwd: string, feedbackDir: string) {
+  let timeout = test.timeout * 60 * 1000  // convert to ms
+  let status = 'pass'
+  let err_message = null
+  let score = test.points || null
+  let feedback = null
+  let execution_time = null
 
-  // https://help.github.com/en/actions/reference/development-tools-for-github-actions#stop-and-start-log-commands-stop-commands
-  const token = uuidv4()
-  log('')
-  log(`::stop-commands::${token}`)
-  log('')
+  try {
+    // if setup command exists, run it
+    if (test.setup) {
+      const startSetup = new Date().getTime()
 
-  let failed = false
+      execSync(test.setup, {
+        cwd,
+        timeout,
+        stdio: 'ignore',
+        env: defaultEnv,
+      })
 
-  for (const test of tests) {
-    try {
-      if (test.points) {
-        hasPoints = true
-        availablePoints += test.points
-      }
-      log(color.cyan(`📝 ${test.name}`))
-      log('')
-      await run(test, cwd)
-      log('')
-      log(color.green(`✅ ${test.name}`))
-      log(``)
-      if (test.points) {
-        points += test.points
-      }
-    } catch (error) {
-      failed = true
-      log('')
-      log(color.red(`❌ ${test.name}`))
-      if (error instanceof Error) {
-        core.setFailed(error.message)
-      } else {
-        core.setFailed(`Failed to run test '${test.name}'`)
-      }
+      timeout -= (new Date().getTime() - startSetup)
+    }
+
+    // create unique filename for feedback messages
+    const feedbackPath = path.join(feedbackDir, `grading_feedback_${uuidv4()}.md`)
+
+    // run test command
+    const startTime = new Date().getTime()
+    const {output, error} = executeTest(test.run, test.input || '', timeout, cwd, feedbackPath)
+    const endTime = new Date().getTime()
+
+    execution_time = `${(endTime - startTime) / 1000}s`
+
+    if (error) {
+      status = 'error'
+      err_message = error
+      score = (test.points) ? 0 : null
+    } else if (!compareOutput(output || '', test.output || '', test.comparison)) {
+      status = 'fail'
+      err_message = `Output does not match expected. Got: ${output}`
+      score = (test.points) ? 0 : null
+    }
+
+    // read feedback file
+    feedback = fs.readFileSync(feedbackPath, 'utf8')
+
+    // delete feedback file
+    if (fs.existsSync(feedbackPath)) {
+      fs.unlinkSync(feedbackPath)
+    }
+  } catch (error) { // TODO: catch specific errors
+    status = 'error'
+    if (error instanceof Error) {
+      // {status, err_message} = getErrorMessageAndStatus(error, test.run)
+      err_message = error.message
+    } else {
+      // status = 'error'
+      err_message = `Failed to execute run test: ${test.name}: ${error}`
     }
   }
 
-  // Restart command processing
-  log('')
-  log(`::${token}::`)
+  return {
+    name: test.name,
+    status,
+    err_message,
+    content: feedback || null,
+    test_code: `${test.run} <stdin>${test.input || ''}`,
+    filename: '',
+    line_no: 0,
+    execution_time: execution_time || 0,
+    score,
+  }
+}
 
-  if (failed) {
-    // We need a good failure experience
+export const runAll = async (tests: Array<Test>, cwd: string): Promise<void> => {
+  let accumulatedPoints = 0
+  let availablePoints = 0
+  let hasPoints = false
+  let status = 'pass'
+  let testResults = []
+
+  // create feedback dir
+  const feedbackDir = createFeedbackDir()
+
+  // run through all tests
+  for (const test of tests) {
+    if (test.points) {
+      hasPoints = true
+      availablePoints += test.points
+    }
+
+    console.log(color.cyan(`📝 ${test.name}`))
+
+    const result = runTest(test, cwd, feedbackDir)
+    // log outputs during runTest()
+
+    testResults.push(result)
+
+    if (test.points) {
+      accumulatedPoints += result.score || 0
+    }
+
+    if (result.status === 'pass') {
+      console.log(color.green(`✅ ${test.name}`))
+    } else {
+      console.log(color.red(`❌ ${test.name}`))
+      core.setFailed(`Failed to run test '${test.name}'`)
+      status = 'error'
+    }
+
+    console.log('')
+  }
+
+  if (status === 'pass') {
+    console.log(color.green(`✅ All tests passed`))
+    console.log('')
+    console.log('✨🌟💖💎🦄💎💖🌟✨🌟💖💎🦄💎💖🌟✨')
   } else {
-    log('')
-    log(color.green('All tests passed'))
-    log('')
-    log('✨🌟💖💎🦄💎💖🌟✨🌟💖💎🦄💎💖🌟✨')
-    log('')
+    console.log(color.red(`❌ Some tests failed`))
+    console.log('')
+    // output bugs
+    console.log('❗❗🐛🐛🐛🐛🐛🐛🐛🐛🐛🐛🐛🐛🐛❗❗')
   }
 
   // Set the number of points
   if (hasPoints) {
-    const text = `Points ${points}/${availablePoints}`
-    log(color.bold.bgCyan.black(text))
-    core.setOutput('Points', `${points}/${availablePoints}`)
+    const text = `Points ${accumulatedPoints}/${availablePoints}`
+    console.log(color.bold.bgCyan.black(text))
+    core.setOutput('Points', `${accumulatedPoints}/${availablePoints}`)
     await setCheckRunOutput(text)
   }
+
+  // Output results
+  const results = {
+    version: 0, // ver 0 because don't know if this is compatible with other reporting systems
+    status,
+    max_score: availablePoints,
+    tests: testResults,
+  }
+  core.setOutput('result', btoa(JSON.stringify(results)))
 }
