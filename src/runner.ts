@@ -117,6 +117,7 @@ function runTest(test: Test, cwd: string, feedbackDir: string) {
     if (test.setup) {
       const startSetup = new Date().getTime()
 
+      console.log(`Running setup command: ${test.setup}`)
       execSync(test.setup, {
         cwd,
         timeout,
@@ -133,6 +134,7 @@ function runTest(test: Test, cwd: string, feedbackDir: string) {
     // run test command
     const startTime = new Date().getTime()
     const {output, error} = executeTest(test.run, test.input || '', timeout, cwd, feedbackPath)
+    console.log(`Output: ${output}`)
     const endTime = new Date().getTime()
 
     execution_time = `${(endTime - startTime) / 1000}s`
@@ -164,6 +166,7 @@ function runTest(test: Test, cwd: string, feedbackDir: string) {
       err_message = `Failed to execute run test: ${test.name}: ${error}`
     }
   }
+  if (err_message) console.log(`Error: ${err_message}`)
 
   return {
     name: test.name,
