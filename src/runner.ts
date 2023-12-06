@@ -164,6 +164,7 @@ function runTest(test: Test, cwd: string, feedbackDir: string) {
       // status = 'error'
       err_message = `Failed to execute run test: ${test.name}: ${error}`
     }
+    score = (test.points) ? 0 : null
   }
   if (err_message) console.log(`Error: ${err_message}`)
 
